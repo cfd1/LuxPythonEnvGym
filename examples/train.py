@@ -65,6 +65,7 @@ def get_command_line_arguments():
     parser.add_argument('--gae_lambda', help='GAE Lambda', type=float, default=0.95)
     parser.add_argument('--batch_size', help='batch_size', type=float, default=2048)  # 64
     parser.add_argument('--step_count', help='Total number of steps to train', type=int, default=10000000)
+    parser.add_argument('--num_cpu', help='Total number of sub-processes to spawn', type=int, default=6)
     args = parser.parse_args()
 
     return args
@@ -87,19 +88,65 @@ def train(args):
     player = AgentPolicy(mode="train")
 
     # Train the model
-    num_cpu = 6
-    if num_cpu == 1:
+    if args.num_cpu == 1:
         env = LuxEnvironment(configs=configs,
                              learning_agent=player,
                              opponent_agent=opponent)
     else:
         env = SubprocVecEnv([make_env(LuxEnvironment(configs=configs,
                                                      learning_agent=AgentPolicy(mode="train"),
-                                                     opponent_agent=opponent), i) for i in range(num_cpu)])
+                                                     opponent_agent=opponent), i) for i in range(args.num_cpu)])
     run_id = args.id
     print("Run id %s" % run_id)
-    model = PPO("MlpPolicy",
-                env,
+    model = PPO(
+        policy="MlpPolicy",
+        env=env,
+        verbose=1,
+        tensorboard_log="./lux_tensorboard/",
+        learning_rate=linear_schedule(args.learning_rate),
+        gamma=args.gamma,
+        gae_lambda=args.gae_lambda,
+        batch_size=args.batch_size,
+        n_steps=2048 * 8
+    )
+
+    print("Training model...")
+    # Save a checkpoint every 1M steps
+    checkpoint_callback = CheckpointCallback(save_freq=1000000,
+                                             save_path='./models/',
+                                             name_prefix=f'rl_model_{run_id}')
+    model.learn(total_timesteps=args.step_count,
+                callback=checkpoint_callback)
+
+    if not os.path.exists(f'models/rl_model_{run_id}_{args.step_count}_steps.zip'):
+        model.save(path=f'models/rl_model_{run_id}_{args.step_count}_steps.zip')
+
+    print("Done training model.")
+
+
+def inference_with_rendering(args):
+    """
+
+    :param args: (ArgumentParser) The command line arguments
+    """
+    print(args)
+
+    # Run a training job
+    configs = LuxMatchConfigs_Default
+
+    # Create a default opponent agent
+    opponent = Agent()
+
+    # Create a RL agent in training mode
+    player = AgentPolicy(mode="train")
+
+    env = LuxEnvironment(configs=configs,
+                         learning_agent=player,
+                         opponent_agent=opponent)
+    run_id = args.id
+    print("Run id %s" % run_id)
+    model = PPO(policy="MlpPolicy",
+                env=env,
                 verbose=1,
                 tensorboard_log="./lux_tensorboard/",
                 learning_rate=linear_schedule(args.learning_rate),
@@ -108,17 +155,6 @@ def train(args):
                 batch_size=args.batch_size,
                 n_steps=2048 * 8
                 )
-
-    print("Training model...")
-    # Save a checkpoint every 1M steps
-    checkpoint_callback = CheckpointCallback(save_freq=1000000,
-                                             save_path='./models/',
-                                             name_prefix=f'rl_model_{run_id}')
-    model.learn(total_timesteps=args.step_count,
-                callback=checkpoint_callback)  # 20M steps
-    if not os.path.exists(f'models/rl_model_{run_id}_{args.step_count}_steps.zip'):
-        model.save(path=f'models/rl_model_{run_id}_{args.step_count}_steps.zip')
-    print("Done training model.")
 
     # Inference the model
     print("Inference model policy with rendering...")
@@ -136,27 +172,76 @@ def train(args):
         if done:
             print("Episode done, resetting.")
             obs = env.reset()
+
     print("Done")
 
-    '''
-    # Learn with self-play against the learned model as an opponent now
-    print("Training model with self-play against last version of model...")
-    player = AgentPolicy(mode="train")
-    opponent = AgentPolicy(mode="inference", model=model)
-    env = LuxEnvironment(configs, player, opponent)
-    model = PPO("MlpPolicy",
-        env,
-        verbose=1,
-        tensorboard_log="./lux_tensorboard/",
-        learning_rate = 0.0003,
-        gamma=0.999,
-        gae_lambda = 0.95
-    )
 
-    model.learn(total_timesteps=2000)
-    env.close()
-    print("Done")
-    '''
+# def train_self_play(args):
+#     """
+#     Learn with self-play against the learned model as an opponent now
+#     :param args: (ArgumentParser) The command line arguments
+#     """
+#     print("Training model with self-play against last version of model...")
+#     print(args)
+#
+#     # Run a training job
+#     configs = LuxMatchConfigs_Default
+#
+#     # Create a default opponent agent
+#     saves = glob.glob(f'models/rl_model_{run_id}_*_steps.zip')
+#     latest_save = sorted(saves, key=lambda x: int(x.split('_')[-2]), reverse=True)[0]
+#     model.load(path=latest_save)
+#     opponent = AgentPolicy(mode="inference", model=model)
+#
+#     # Create a RL agent in training mode
+#     player = AgentPolicy(mode="train")
+#
+#     # Train the model
+#     if args.num_cpu == 1:
+#         env = LuxEnvironment(configs=configs,
+#                              learning_agent=player,
+#                              opponent_agent=opponent)
+#     else:
+#         env = SubprocVecEnv([make_env(LuxEnvironment(configs=configs,
+#                                                      learning_agent=AgentPolicy(mode="train"),
+#                                                      opponent_agent=opponent), i) for i in range(args.num_cpu)])
+#     run_id = args.id
+#     print("Run id %s" % run_id)
+#     model = PPO("MlpPolicy",
+#                 env,
+#                 verbose=1,
+#                 tensorboard_log="./lux_tensorboard/",
+#                 learning_rate=linear_schedule(args.learning_rate),
+#                 gamma=args.gamma,
+#                 gae_lambda=args.gae_lambda,
+#                 batch_size=args.batch_size,
+#                 n_steps=2048 * 8
+#                 )
+#
+#     env = LuxEnvironment(configs, player, opponent)
+#     model = PPO("MlpPolicy",
+#                 env,
+#                 verbose=1,
+#                 tensorboard_log="./lux_tensorboard/",
+#                 learning_rate=0.0003,
+#                 gamma=0.999,
+#                 gae_lambda=0.95
+#                 )
+#
+#     model = PPO("MlpPolicy",
+#                 env,
+#                 verbose=1,
+#                 tensorboard_log="./lux_tensorboard/",
+#                 learning_rate=args.learning_rate,
+#                 gamma=args.gamma,
+#                 gae_lambda=args.gae_lambda,
+#                 batch_size=args.batch_size,
+#                 n_steps=2048 * 8
+#                 )
+#
+#     model.learn(total_timesteps=2000)
+#     env.close()
+#     print("Done")
 
 
 if __name__ == "__main__":
@@ -164,4 +249,7 @@ if __name__ == "__main__":
     local_args = get_command_line_arguments()
 
     # Train the model
-    train(local_args)
+    train(args=local_args)
+
+    # Test the inference
+    # inference_with_rendering(args=local_args)
